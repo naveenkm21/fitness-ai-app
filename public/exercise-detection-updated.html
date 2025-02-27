@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exercise Detection Demo</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        .video-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            margin: 20px auto;
+            border: 3px solid #333;
+            border-radius: 10px;
+            overflow: hidden;
+            background-color: #000;
+        }
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .controls {
+            margin: 20px 0;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .results {
+            width: 640px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .exercise-status {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 20px 0;
+        }
+        .rep-counter {
+            font-size: 48px;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        .loading {
+            margin: 20px 0;
+        }
+        .model-selector {
+            margin: 20px 0;
+        }
+        .debug-info {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 5px;
+            text-align: left;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Exercise Detection Demo</h1>
+    
+    <div class="container">
+        <div class="loading" id="loading">
+            <p>Loading TensorFlow.js...</p>
+        </div>
+        
+        <div class="model-selector">
+            <label for="modelSelect">Select Exercise Detection Model:</label>
+            <select id="modelSelect">
+                <option value="squat">Squat Detection</option>
+                <option value="pushup">Push-up Detection</option>
+                <option value="jumping">Jumping Jack Detection</option>
+                <option value="bicep">Bicep Curl Detection</option>
+            </select>
+        </div>
+        
+        <div class="video-container">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="output"></canvas>
+        </div>
+        
+        <div class="controls">
+            <button id="startBtn">Start Camera</button>
+            <button id="detectBtn" disabled>Detect Exercise</button>
+            <button id="stopBtn" disabled>Stop</button>
+        </div>
+        
+        <div class="results">
+            <div class="exercise-status" id="exerciseStatus">Not detecting</div>
+            <div>
+                <p>Exercise detected:</p>
+                <p id="detectedExercise">None</p>
+            </div>
+            <div>
+                <p>Repetition count:</p>
+                <div class="rep-counter" id="repCount">0</div>
+            </div>
+            <div id="confidenceDisplay"></div>
+            <div class="debug-info" id="debugInfo"></div>
+        </div>
+    </div>
+
+    <!-- Load TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.20.0"></script>
+    
+    <!-- Load MoveNet model (newer and more accurate than PoseNet) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.0.0"></script>
+    
+    <script>
+        // App state management (easier to port to React)
+        const state = {
+            model: null,
+            detector: null,
+            isModelLoaded: false,
+            isDetecting: false,
+            stream: null,
+            animationId: null,
+            currentExercise: "None",
+            selectedExerciseType: "squat",
+            reps: 0,
+            lastPoseState: "unknown",
+            poseHistory: [],
+            confidenceThreshold: 0.25,
+            debugMode: true  // Enable debug mode to help troubleshoot
+        };
+
+        // DOM elements
+        const elements = {
+            video: document.getElementById('webcam'),
+            canvas: document.getElementById('output'),
+            startBtn: document.getElementById('startBtn'),
+            detectBtn: document.getElementById('detectBtn'),
+            stopBtn: document.getElementById('stopBtn'),
+            loading: document.getElementById('loading'),
+            exerciseStatus: document.getElementById('exerciseStatus'),
+            detectedExercise: document.getElementById('detectedExercise'),
+            repCount: document.getElementById('repCount'),
+            modelSelect: document.getElementById('modelSelect'),
+            confidenceDisplay: document.getElementById('confidenceDisplay'),
+            debugInfo: document.getElementById('debugInfo')
+        };
+        
+        let ctx;
+
+        // Initialize the application
+        async function init() {
+            console.log("Initializing application...");
+            
+            // Initialize canvas context
+            ctx = elements.canvas.getContext('2d');
+            
+            // Debug info update
+            updateDebugInfo("Application initializing...");
+            
+            // Load TensorFlow.js
+            try {
+                await tf.ready();
+                console.log("TensorFlow.js is ready");
+                elements.loading.innerHTML = "<p>TensorFlow.js loaded. Loading pose detection model...</p>";
+                updateDebugInfo("TensorFlow.js loaded successfully");
+                
+                // Load the model
+                await loadModel();
+                
+                // Set up event listeners
+                setupEventListeners();
+                
+                elements.loading.style.display = "none";
+            } catch (error) {
+                console.error("Error initializing application:", error);
+                elements.loading.innerHTML = "<p>Error initializing TensorFlow.js. Please try refreshing the page.</p>";
+                updateDebugInfo("Error: " + error.message);
+            }
+        }
+
+        // Load the pose detection model
+        async function loadModel() {
+            try {
+                updateDebugInfo("Loading MoveNet model...");
+                
+                // Use MoveNet - a newer and more efficient model than PoseNet
+                const detectorConfig = {
+                    modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+                    enableSmoothing: true
+                };
+                
+                state.detector = await poseDetection.createDetector(
+                    poseDetection.SupportedModels.MoveNet, 
+                    detectorConfig
+                );
+                
+                console.log("Model loaded successfully");
+                updateDebugInfo("MoveNet model loaded successfully");
+                state.isModelLoaded = true;
+                return true;
+            } catch (error) {
+                console.error("Error loading model:", error);
+                elements.loading.innerHTML = "<p>Error loading pose detection model. Please check your internet connection and try again.</p>";
+                updateDebugInfo("Error loading model: " + error.message);
+                return false;
+            }
+        }
+
+        // Helper to update debug info
+        function updateDebugInfo(message) {
+            if (!state.debugMode) return;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            const debugMsg = `[${timestamp}] ${message}`;
+            console.log(debugMsg);
+            
+            if (elements.debugInfo) {
+                elements.debugInfo.innerHTML += debugMsg + "<br>";
+                elements.debugInfo.scrollTop = elements.debugInfo.scrollHeight;
+            }
+        }
+
+        // Set up event listeners
+        function setupEventListeners() {
+            // Start camera button
+            elements.startBtn.addEventListener('click', startCamera);
+            
+            // Detect exercise button
+            elements.detectBtn.addEventListener('click', startDetection);
+            
+            // Stop detection button
+            elements.stopBtn.addEventListener('click', stopDetection);
+            
+            // Model selection
+            elements.modelSelect.addEventListener('change', (e) => {
+                state.selectedExerciseType = e.target.value;
+                state.reps = 0;
+                elements.repCount.textContent = "0";
+                state.lastPoseState = "unknown";
+                updateDebugInfo("Selected exercise type: " + state.selectedExerciseType);
+            });
+        }
+
+        // Start the webcam
+        async function startCamera() {
+            try {
+                updateDebugInfo("Starting camera...");
+                
+                state.stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: 640,
+                        height: 480
+                    },
+                    audio: false
+                });
+                
+                elements.video.srcObject = state.stream;
+                
+                // Wait for video to be ready
+                elements.video.onloadedmetadata = () => {
+                    elements.canvas.width = elements.video.videoWidth;
+                    elements.canvas.height = elements.video.videoHeight;
+                    
+                    // Ensure canvas is positioned correctly
+                    elements.canvas.style.width = elements.video.videoWidth + "px";
+                    elements.canvas.style.height = elements.video.videoHeight + "px";
+                    
+                    elements.startBtn.disabled = true;
+                    elements.detectBtn.disabled = false;
+                    updateDebugInfo("Camera started. Video dimensions: " + 
+                                  elements.video.videoWidth + "x" + elements.video.videoHeight);
+                };
+            } catch (error) {
+                console.error("Error accessing webcam:", error);
+                alert("Error accessing webcam. Please ensure you have a webcam connected and have granted permission.");
+                updateDebugInfo("Error accessing webcam: " + error.message);
+            }
+        }
+
+        // Start pose detection
+        function startDetection() {
+            if (!state.isModelLoaded) {
+                alert("Model is not loaded yet. Please wait.");
+                return;
+            }
+            
+            state.isDetecting = true;
+            elements.detectBtn.disabled = true;
+            elements.stopBtn.disabled = false;
+            elements.exerciseStatus.textContent = "Detecting...";
+            
+            // Reset counters
+            state.reps = 0;
+            elements.repCount.textContent = "0";
+            state.lastPoseState = "unknown";
+            state.poseHistory = [];
+            
+            updateDebugInfo("Starting detection for: " + state.selectedExerciseType);
+            
+            // Start detection loop
+            detectPoses();
+        }
+
+        // Stop pose detection
+        function stopDetection() {
+            state.isDetecting = false;
+            
+            if (state.animationId) {
+                cancelAnimationFrame(state.animationId);
+            }
+            
+            elements.detectBtn.disabled = false;
+            elements.stopBtn.disabled = true;
+            elements.exerciseStatus.textContent = "Not detecting";
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+            updateDebugInfo("Detection stopped");
+        }
+
+        // Main detection loop
+        async function detectPoses() {
+            if (!state.isDetecting) return;
+            
+            try {
+                // Detect poses
+                const poses = await state.detector.estimatePoses(elements.video);
+                
+                // Clear canvas
+                ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+                
+                // If poses detected
+                if (poses && poses.length > 0) {
+                    const pose = poses[0]; // Use the first detected person
+                    
+                    // Draw skeleton
+                    drawSkeleton(pose);
+                    
+                    // Store pose for smoothing
+                    state.poseHistory.push(pose);
+                    if (state.poseHistory.length > 5) {
+                        state.poseHistory.shift();
+                    }
+                    
+                    // Analyze pose to detect exercise
+                    analyzeExercise(pose);
+                } else {
+                    updateDebugInfo("No poses detected in this frame");
+                }
+                
+                // Continue detection loop
+                state.animationId = requestAnimationFrame(detectPoses);
+            } catch (error) {
+                console.error("Error during pose detection:", error);
+                elements.exerciseStatus.textContent = "Error detecting";
+                state.isDetecting = false;
+                updateDebugInfo("Detection error: " + error.message);
+            }
+        }
+
+        // Draw the skeleton on canvas
+        function drawSkeleton(pose) {
+            if (!pose || !pose.keypoints) {
+                updateDebugInfo("No keypoints to draw");
+                return;
+            }
+            
+            const keypoints = pose.keypoints;
+            
+            // Log keypoints for debugging
+            if (state.debugMode) {
+                const visibleKeypoints = keypoints.filter(kp => kp.score > state.confidenceThreshold).length;
+                updateDebugInfo(`Drawing ${visibleKeypoints}/${keypoints.length} keypoints`);
+            }
+            
+            // Draw keypoints
+            keypoints.forEach(keypoint => {
+                if (keypoint.score > state.confidenceThreshold) {
+                    ctx.beginPath();
+                    ctx.arc(keypoint.x, keypoint.y, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'aqua';
+                    ctx.fill();
+                    
+                    // Always display keypoint names for better debugging
+                    ctx.fillStyle = 'white';
+                    ctx.font = '10px Arial';
+                    ctx.fillText(keypoint.name, keypoint.x + 7, keypoint.y - 3);
+                }
+            });
+            
+            // Define connections for skeleton
+            const connections = [
+                ['nose', 'left_eye'], ['left_eye', 'left_ear'], ['nose', 'right_eye'],
+                ['right_eye', 'right_ear'], ['left_shoulder', 'right_shoulder'],
+                ['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'],
+                ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist'],
+                ['left_shoulder', 'left_hip'], ['right_shoulder', 'right_hip'],
+                ['left_hip', 'right_hip'], ['left_hip', 'left_knee'],
+                ['left_knee', 'left_ankle'], ['right_hip', 'right_knee'],
+                ['right_knee', 'right_ankle']
+            ];
+            
+            // Draw connections
+            ctx.strokeStyle = 'lime';
+            ctx.lineWidth = 2;
+            
+            connections.forEach(([p1Name, p2Name]) => {
+                const p1 = keypoints.find(kp => kp.name === p1Name);
+                const p2 = keypoints.find(kp => kp.name === p2Name);
+                
+                if (p1 && p2 && p1.score > state.confidenceThreshold && p2.score > state.confidenceThreshold) {
+                    ctx.beginPath();
+                    ctx.moveTo(p1.x, p1.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.stroke();
+                }
+            });
+            
+            // Display confidence
+            const avgConfidence = keypoints.reduce((sum, kp) => sum + kp.score, 0) / keypoints.length;
+            elements.confidenceDisplay.innerHTML = `<p>Pose detection confidence: ${(avgConfidence * 100).toFixed(1)}%</p>`;
+        }
+
+        // Analyze pose to detect exercises
+        function analyzeExercise(pose) {
+            if (!pose || !pose.keypoints) {
+                updateDebugInfo("No keypoints for exercise analysis");
+                return;
+            }
+            
+            const keypointMap = {};
+            pose.keypoints.forEach(kp => {
+                keypointMap[kp.name] = {
+                    x: kp.x,
+                    y: kp.y,
+                    score: kp.score
+                };
+            });
+            
+            // Call the appropriate exercise detection based on selection
+            switch (state.selectedExerciseType) {
+                case 'squat':
+                    detectSquat(keypointMap);
+                    break;
+                case 'pushup':
+                    detectPushup(keypointMap);
+                    break;
+                case 'jumping':
+                    detectJumpingJack(keypointMap);
+                    break;
+                case 'bicep':
+                    detectBicepCurl(keypointMap);
+                    break;
+                default:
+                    detectSquat(keypointMap);
+            }
+            
+            // Update UI
+            elements.detectedExercise.textContent = state.currentExercise;
+        }
+
+        // Detect squats
+        function detectSquat(keypoints) {
+            const leftHip = keypoints['left_hip'];
+            const rightHip = keypoints['right_hip'];
+            const leftKnee = keypoints['left_knee'];
+            const rightKnee = keypoints['right_knee'];
+            const leftAnkle = keypoints['left_ankle'];
+            const rightAnkle = keypoints['right_ankle'];
+            
+            // Check if key points are detected with sufficient confidence
+            if (
+                leftHip && rightHip && leftKnee && rightKnee && leftAnkle && rightAnkle &&
+                leftHip.score > state.confidenceThreshold && rightHip.score > state.confidenceThreshold &&
+                leftKnee.score > state.confidenceThreshold && rightKnee.score > state.confidenceThreshold &&
+                leftAnkle.score > state.confidenceThreshold && rightAnkle.score > state.confidenceThreshold
+            ) {
+                // Calculate hip height relative to knees
+                const hipHeight = (leftHip.y + rightHip.y) / 2;
+                const kneeHeight = (leftKnee.y + rightKnee.y) / 2;
+                const ankleHeight = (leftAnkle.y + rightAnkle.y) / 2;
+                
+                // Calculate angle at knee for more accurate squat detection
+                const kneeAngle = calculateAngle(
+                    [(leftHip.x + rightHip.x) / 2, (leftHip.y + rightHip.y) / 2],
+                    [(leftKnee.x + rightKnee.x) / 2, (leftKnee.y + rightKnee.y) / 2],
+                    [(leftAnkle.x + rightAnkle.x) / 2, (leftAnkle.y + rightAnkle.y) / 2]
+                );
+                
+                // Display angle for debugging
+                ctx.fillStyle = 'white';
+                ctx.font = '12px Arial';
+                ctx.fillText(`Knee angle: ${kneeAngle.toFixed(1)}°`, 10, 30);
+                
+                // Update debug info
+                updateDebugInfo(`Squat knee angle: ${kneeAngle.toFixed(1)}°`);
+                
+                // Use knee angle for detection
+                if (kneeAngle < 120) { // Person is in squat position
+                    if (state.lastPoseState === "standing") {
+                        // Transition from standing to squatting - count a rep
+                        state.reps++;
+                        elements.repCount.textContent = state.reps;
+                        updateDebugInfo("SQUAT REP COUNTED: " + state.reps);
+                    }
+                    state.lastPoseState = "squatting";
+                    state.currentExercise = "Squat (down position)";
+                } else if (kneeAngle > 160) { // Person is standing
+                    state.lastPoseState = "standing";
+                    state.currentExercise = "Squat (standing position)";
+                } else {
+                    state.currentExercise = "Squat (transitioning)";
+                }
+            } else {
+                state.currentExercise = "Squat (detecting...)";
+                updateDebugInfo("Missing required keypoints for squat detection");
+            }
+        }
+
+        // Detect push-ups
+        function detectPushup(keypoints) {
+            const leftShoulder = keypoints['left_shoulder'];
+            const rightShoulder = keypoints['right_shoulder'];
+            const leftElbow = keypoints['left_elbow'];
+            const rightElbow = keypoints['right_elbow'];
+            const leftWrist = keypoints['left_wrist'];
+            const rightWrist = keypoints['right_wrist'];
+            
+            if (
+                leftShoulder && rightShoulder && leftElbow && rightElbow && leftWrist && rightWrist &&
+                leftShoulder.score > state.confidenceThreshold && rightShoulder.score > state.confidenceThreshold &&
+                leftElbow.score > state.confidenceThreshold && rightElbow.score > state.confidenceThreshold &&
+                leftWrist.score > state.confidenceThreshold && rightWrist.score > state.confidenceThreshold
+            ) {
+                // Calculate elbow angle
+                const leftElbowAngle = calculateAngle(
+                    [leftShoulder.x, leftShoulder.y],
+                    [leftElbow.x, leftElbow.y],
+                    [leftWrist.x, leftWrist.y]
+                );
+                
+                const rightElbowAngle = calculateAngle(
+                    [rightShoulder.x, rightShoulder.y],
+                    [rightElbow.x, rightElbow.y],
+                    [rightWrist.x, rightWrist.y]
+                );
+                
+                // Average elbow angle
+                const elbowAngle = (leftElbowAngle + rightElbowAngle) / 2;
+                
+                ctx.fillStyle = 'white';
+                ctx.font = '12px Arial';
+                ctx.fillText(`Elbow angle: ${elbowAngle.toFixed(1)}°`, 10, 30);
+                
+                updateDebugInfo(`Pushup elbow angle: ${elbowAngle.toFixed(1)}°`);
+                
+                if (elbowAngle < 90) { // Arms bent - down position
+                    if (state.lastPoseState === "up") {
+                        // Transition from up to down - count a rep
+                        state.reps++;
+                        elements.repCount.textContent = state.reps;
+                        updateDebugInfo("PUSHUP REP COUNTED: " + state.reps);
+                    }
+                    state.lastPoseState = "down";
+                    state.currentExercise = "Push-up (down position)";
+                } else if (elbowAngle > 150) { // Arms straight - up position
+                    state.lastPoseState = "up";
+                    state.currentExercise = "Push-up (up position)";
+                } else {
+                    state.currentExercise = "Push-up (transitioning)";
+                }
+            } else {
+                state.currentExercise = "Push-up (detecting...)";
+                updateDebugInfo("Missing required keypoints for pushup detection");
+            }
+        }
+
+        // Detect jumping jacks
+        function detectJumpingJack(keypoints) {
+            const leftShoulder = keypoints['left_shoulder'];
+            const rightShoulder = keypoints['right_shoulder'];
+            const leftHip = keypoints['left_hip'];
+            const rightHip = keypoints['right_hip'];
+            const leftAnkle = keypoints['left_ankle'];
+            const rightAnkle = keypoints['right_ankle'];
+            
+            if (
+                leftShoulder && rightShoulder && leftHip && rightHip && leftAnkle && rightAnkle &&
+                leftShoulder.score > state.confidenceThreshold && rightShoulder.score > state.confidenceThreshold &&
+                leftHip.score > state.confidenceThreshold && rightHip.score > state.confidenceThreshold &&
+                leftAnkle.score > state.confidenceThreshold && rightAnkle.score > state.confidenceThreshold
+            ) {
+                // Calculate distances for jumping jack detection
+                const shoulderDistance = Math.sqrt(
+                    Math.pow(rightShoulder.x - leftShoulder.x, 2) + 
+                    Math.pow(rightShoulder.y - leftShoulder.y, 2)
+                );
+                
+                const ankleDistance = Math.sqrt(
+                    Math.pow(rightAnkle.x - leftAnkle.x, 2) + 
+                    Math.pow(rightAnkle.y - leftAnkle.y, 2)
+                );
+                
+                // Normalize by height (distance between shoulders and hips)
+                const torsoHeight = Math.sqrt(
+                    Math.pow((leftShoulder.x + rightShoulder.x)/2 - (leftHip.x + rightHip.x)/2, 2) + 
+                    Math.pow((leftShoulder.y + rightShoulder.y)/2 - (leftHip.y + rightHip.y)/2, 2)
+                );
+                
+                const normalizedShoulderDist = shoulderDistance / torsoHeight;
+                const normalizedAnkleDist = ankleDistance / torsoHeight;
+                
+                ctx.fillStyle = 'white';
+                ctx.font = '12px Arial';
+                ctx.fillText(`Shoulder dist: ${normalizedShoulderDist.toFixed(2)}`, 10, 30);
+                ctx.fillText(`Ankle dist: ${normalizedAnkleDist.toFixed(2)}`, 10, 50);
+                
+                updateDebugInfo(`Jumping Jack - Shoulder dist: ${normalizedShoulderDist.toFixed(2)}, Ankle dist: ${normalizedAnkleDist.toFixed(2)}`);
+                
+                if (normalizedShoulderDist > 1.5 && normalizedAnkleDist > 0.8) {
+                    // Arms and legs are spread
+                    if (state.lastPoseState === "closed") {
+                        // Transition from closed to open - count a rep
+                        state.reps++;
+                        elements.repCount.textContent = state.reps;
+                        updateDebugInfo("JUMPING JACK REP COUNTED: " + state.reps);
+                    }
+                    state.lastPoseState = "open";
+                    state.currentExercise = "Jumping Jack (open position)";
+                } else if (normalizedShoulderDist < 1.2 && normalizedAnkleDist < 0.5) {
+                    // Arms and legs are together
+                    state.lastPoseState = "closed";
+                    state.currentExercise = "Jumping Jack (closed position)";
+                } else {
+                    state.currentExercise = "Jumping Jack (transitioning)";
+                }
+            } else {
+                state.currentExercise = "Jumping Jack (detecting...)";
+                updateDebugInfo("Missing required keypoints for jumping jack detection");
+            }
+        }
+
+        // NEW: Detect bicep curls
+        function detectBicepCurl(keypoints) {
+            // We'll focus on right arm for simplicity, could expand to track both
+            const rightShoulder = keypoints['right_shoulder'];
+            const rightElbow = keypoints['right_elbow'];
+            const rightWrist = keypoints['right_wrist'];
+            
+            if (
+                rightShoulder && rightElbow && rightWrist &&
+                rightShoulder.score > state.confidenceThreshold && 
+                rightElbow.score > state.confidenceThreshold && 
+                rightWrist.score > state.confidenceThreshold
+            ) {
+                // Calculate elbow angle
+                const elbowAngle = calculateAngle(
+                    [rightShoulder.x, rightShoulder.y],
+                    [rightElbow.x, rightElbow.y],
+                    [rightWrist.x, rightWrist.y]
+                );
+                
+                // Display angle for debugging
+                ctx.fillStyle = 'white';
+                ctx.font = '12px Arial';
+                ctx.fillText(`Bicep curl angle: ${elbowAngle.toFixed(1)}°`, 10, 30);
+                
+                updateDebugInfo(`Bicep curl angle: ${elbowAngle.toFixed(1)}°`);
+                
+                // Analyze the angle to determine bicep curl state
+                if (elbowAngle < 80) { // Arm is contracted (curl up position)
+                    if (state.lastPoseState === "down") {
+                        // Transition from down to up - count a rep
+                        state.reps++;
+                        elements.repCount.textContent = state.reps;
+                        updateDebugInfo("BICEP CURL REP COUNTED: " + state.reps);
+                    }
+                    state.lastPoseState = "up";
+                    state.currentExercise = "Bicep Curl (up position)";
+                } else if (elbowAngle > 150) { // Arm is extended (starting position)
+                    state.lastPoseState = "down";
+                    state.currentExercise = "Bicep Curl (down position)";
+                } else {
+                    state.currentExercise = "Bicep Curl (transitioning)";
+                }
+            } else {
+                state.currentExercise = "Bicep Curl (detecting...)";
+                updateDebugInfo("Missing required keypoints for bicep curl detection");
+            }
+        }
+
+        // Calculate angle between three points
+        function calculateAngle(p1, p2, p3) {
+            const radians = Math.atan2(p3[1] - p2[1], p3[0] - p2[0]) - 
+                          Math.atan2(p1[1] - p2[1], p1[0] - p2[0]);
+            
+            let angle = Math.abs(radians * 180.0 / Math.PI);
+            
+            if (angle > 180.0) {
+                angle = 360.0 - angle;
+            }
+            
+            return angle;
+        }
+
+        // Initialize the application when the page loads
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
