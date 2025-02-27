@@ -63,7 +63,7 @@ export default function Home() {
                 </div>
               </div>
               <img
-                src="/placeholder.svg?height=550&width=550"
+                src="/HOMEIMG.png?height=550&width=550"
                 width={550}
                 height={550}
                 alt="AI Fitness Training"
